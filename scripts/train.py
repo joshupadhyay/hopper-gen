@@ -48,7 +48,12 @@ def save_lora_diffusers(peft_unet, save_path):
     from diffusers import StableDiffusionXLPipeline
 
     Path(save_path).mkdir(parents=True, exist_ok=True)
-    unet_lora_state = convert_state_dict_to_diffusers(get_peft_model_state_dict(peft_unet))
+    # get_peft_model_state_dict returns keys with 'base_model.model.' prefix
+    # convert_state_dict_to_diffusers converts lora_A→lora.down but keeps the prefix
+    # We strip it so load_lora_weights can match against the vanilla UNet
+    raw_state = get_peft_model_state_dict(peft_unet)
+    converted = convert_state_dict_to_diffusers(raw_state)
+    unet_lora_state = {k.replace("base_model.model.", ""): v for k, v in converted.items()}
     StableDiffusionXLPipeline.save_lora_weights(save_path, unet_lora_layers=unet_lora_state)
     print(f"  Saved {len(unet_lora_state)} LoRA tensors to {save_path}")
 
