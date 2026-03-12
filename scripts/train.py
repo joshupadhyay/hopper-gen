@@ -37,6 +37,41 @@ image = (
 )
 
 
+def save_lora_diffusers(peft_unet, save_path):
+    """Save PEFT LoRA weights in diffusers-compatible format.
+
+    PEFT's save_pretrained() prefixes keys with 'base_model.model.' which
+    diffusers' load_lora_weights() silently ignores. We strip the prefix
+    and save only LoRA tensors so the round-trip actually works.
+    """
+    import json
+    import safetensors.torch
+
+    state_dict = peft_unet.state_dict()
+    lora_state = {}
+    for key, value in state_dict.items():
+        if "lora_" not in key:
+            continue
+        new_key = key.replace("base_model.model.", "") if key.startswith("base_model.model.") else key
+        lora_state[new_key] = value
+
+    Path(save_path).mkdir(parents=True, exist_ok=True)
+    safetensors.torch.save_file(lora_state, f"{save_path}/adapter_model.safetensors")
+
+    cfg = peft_unet.peft_config["default"]
+    adapter_config = {
+        "peft_type": "LORA",
+        "r": cfg.r,
+        "lora_alpha": cfg.lora_alpha,
+        "target_modules": list(cfg.target_modules),
+        "lora_dropout": cfg.lora_dropout,
+    }
+    with open(f"{save_path}/adapter_config.json", "w") as f:
+        json.dump(adapter_config, f, indent=2)
+
+    print(f"  Saved {len(lora_state)} LoRA tensors to {save_path}")
+
+
 @app.function(
     image=image,
     gpu="A10G",
@@ -321,14 +356,25 @@ def train(run_name: str = "v6", num_epochs: int = 15, repeats: int = 3):
         if (epoch + 1) in checkpoint_epochs:
             ckpt_path = f"{DATA_DIR}/adapters/{run_name}/checkpoint-epoch{epoch+1}"
             Path(ckpt_path).mkdir(parents=True, exist_ok=True)
-            unet.save_pretrained(ckpt_path)
+            save_lora_diffusers(unet, ckpt_path)
             training_data.commit()
             print(f"  ** Checkpoint saved to {ckpt_path}")
 
     # --- Save final LoRA adapter ---
     adapter_save_path = f"{DATA_DIR}/adapters/{run_name}"
     Path(adapter_save_path).mkdir(parents=True, exist_ok=True)
-    unet.save_pretrained(adapter_save_path)
+    save_lora_diffusers(unet, adapter_save_path)
+
+    # --- Verify saved weights load correctly ---
+    print("Verifying saved weights load...")
+    test_state = safetensors.torch.load_file(f"{adapter_save_path}/adapter_model.safetensors")
+    bad_keys = [k for k in test_state if k.startswith("base_model.")]
+    if bad_keys:
+        print(f"WARNING: {len(bad_keys)} keys still have base_model prefix — loading will silently fail!")
+        for k in bad_keys[:5]:
+            print(f"  {k}")
+    else:
+        print(f"  ✓ All {len(test_state)} keys are prefix-free (diffusers-compatible)")
 
     training_data.commit()
     final_loss = running_loss / max(global_step % 50, 1)
