@@ -124,13 +124,24 @@ def debug(run_name: str = "v10-smoke"):
             else:
                 print("✓ LoRA IS WORKING! Images differ!")
 
-            # Save test images
-            img1.save(f"{tmp_dir}/test_lora.png")
-            img2.save(f"{tmp_dir}/test_base.png")
+            # Return images as bytes
+            import io
+            buf1, buf2 = io.BytesIO(), io.BytesIO()
+            img1.save(buf1, format="PNG")
+            img2.save(buf2, format="PNG")
+            return buf1.getvalue(), buf2.getvalue()
         except Exception as e2:
             print(f"✗ Stripped version also failed: {e2}")
+            return None, None
 
 
 @app.local_entrypoint()
 def main(run_name: str = "v10-smoke"):
-    debug.remote(run_name)
+    from pathlib import Path
+    result = debug.remote(run_name)
+    if result and result[0] and result[1]:
+        out = Path("outputs/debug")
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "test_lora.png").write_bytes(result[0])
+        (out / "test_base.png").write_bytes(result[1])
+        print(f"Saved to {out}/test_lora.png and test_base.png")
