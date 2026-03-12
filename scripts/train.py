@@ -321,30 +321,14 @@ def train(run_name: str = "v6", num_epochs: int = 15, repeats: int = 3):
         if (epoch + 1) in checkpoint_epochs:
             ckpt_path = f"{DATA_DIR}/adapters/{run_name}/checkpoint-epoch{epoch+1}"
             Path(ckpt_path).mkdir(parents=True, exist_ok=True)
-            ckpt_state = {}
-            for name, param in unet.named_parameters():
-                if param.requires_grad:
-                    ckpt_state[name] = param.data.cpu()
-            safetensors.torch.save_file(ckpt_state, f"{ckpt_path}/pytorch_lora_weights.safetensors")
-            unet.peft_config["default"].save_pretrained(ckpt_path)
+            unet.save_pretrained(ckpt_path)
             training_data.commit()
             print(f"  ** Checkpoint saved to {ckpt_path}")
 
     # --- Save final LoRA adapter ---
     adapter_save_path = f"{DATA_DIR}/adapters/{run_name}"
     Path(adapter_save_path).mkdir(parents=True, exist_ok=True)
-
-    lora_state_dict = {}
-    for name, param in unet.named_parameters():
-        if param.requires_grad:
-            lora_state_dict[name] = param.data.cpu()
-
-    safetensors.torch.save_file(
-        lora_state_dict,
-        f"{adapter_save_path}/pytorch_lora_weights.safetensors",
-    )
-
-    unet.peft_config["default"].save_pretrained(adapter_save_path)
+    unet.save_pretrained(adapter_save_path)
 
     training_data.commit()
     final_loss = running_loss / max(global_step % 50, 1)

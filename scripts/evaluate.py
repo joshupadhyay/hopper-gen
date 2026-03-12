@@ -117,7 +117,7 @@ def evaluate(
         # --- With LoRA ---
         adapter_path = f"{DATA_DIR}/adapters/{run_name}"
         print(f"  Loading LoRA from {adapter_path}...")
-        pipeline.load_lora_weights(adapter_path)
+        pipeline.load_lora_weights(adapter_path, weight_name="adapter_model.safetensors")
 
         generator = torch.Generator("cuda").manual_seed(seed)
         print("  Generating with LoRA...")

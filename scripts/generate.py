@@ -85,7 +85,7 @@ def generate(
     if use_lora:
         adapter_path = f"{DATA_DIR}/adapters/{run_name}"
         print(f"Loading LoRA adapter from {adapter_path}...")
-        pipeline.load_lora_weights(adapter_path)
+        pipeline.load_lora_weights(adapter_path, weight_name="adapter_model.safetensors")
 
     generator = None
     if seed >= 0:
