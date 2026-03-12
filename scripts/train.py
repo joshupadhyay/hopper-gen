@@ -54,7 +54,8 @@ def save_lora_diffusers(peft_unet, save_path):
         if "lora_" not in key:
             continue
         new_key = key.replace("base_model.model.", "") if key.startswith("base_model.model.") else key
-        lora_state[new_key] = value
+        # load_lora_weights expects 'unet.' prefix to route weights to the UNet
+        lora_state[f"unet.{new_key}"] = value
 
     Path(save_path).mkdir(parents=True, exist_ok=True)
     safetensors.torch.save_file(lora_state, f"{save_path}/adapter_model.safetensors")
@@ -369,13 +370,13 @@ def train(run_name: str = "v6", num_epochs: int = 15, repeats: int = 3):
     # --- Verify saved weights load correctly ---
     print("Verifying saved weights load...")
     test_state = safetensors.torch.load_file(f"{adapter_save_path}/adapter_model.safetensors")
-    bad_keys = [k for k in test_state if k.startswith("base_model.")]
+    bad_keys = [k for k in test_state if not k.startswith("unet.")]
     if bad_keys:
-        print(f"WARNING: {len(bad_keys)} keys still have base_model prefix — loading will silently fail!")
+        print(f"WARNING: {len(bad_keys)} keys missing 'unet.' prefix — loading will silently fail!")
         for k in bad_keys[:5]:
             print(f"  {k}")
     else:
-        print(f"  ✓ All {len(test_state)} keys are prefix-free (diffusers-compatible)")
+        print(f"  ✓ All {len(test_state)} keys have 'unet.' prefix (diffusers-compatible)")
 
     training_data.commit()
     final_loss = running_loss / max(global_step % 50, 1)
