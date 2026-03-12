@@ -38,40 +38,19 @@ image = (
 
 
 def save_lora_diffusers(peft_unet, save_path):
-    """Save PEFT LoRA weights in diffusers-compatible format.
-
-    PEFT's save_pretrained() prefixes keys with 'base_model.model.' which
-    diffusers' load_lora_weights() silently ignores. We strip the prefix
-    and save only LoRA tensors so the round-trip actually works.
+    """Save PEFT LoRA weights using the same approach as diffusers' official
+    train_dreambooth_lora_sdxl.py: get_peft_model_state_dict →
+    convert_state_dict_to_diffusers → StableDiffusionXLPipeline.save_lora_weights.
     """
-    import json
-    import safetensors.torch
     from pathlib import Path
-
-    state_dict = peft_unet.state_dict()
-    lora_state = {}
-    for key, value in state_dict.items():
-        if "lora_" not in key:
-            continue
-        new_key = key.replace("base_model.model.", "") if key.startswith("base_model.model.") else key
-        # load_lora_weights expects 'unet.' prefix to route weights to the UNet
-        lora_state[f"unet.{new_key}"] = value
+    from peft.utils import get_peft_model_state_dict
+    from diffusers.utils import convert_state_dict_to_diffusers
+    from diffusers import StableDiffusionXLPipeline
 
     Path(save_path).mkdir(parents=True, exist_ok=True)
-    safetensors.torch.save_file(lora_state, f"{save_path}/adapter_model.safetensors")
-
-    cfg = peft_unet.peft_config["default"]
-    adapter_config = {
-        "peft_type": "LORA",
-        "r": cfg.r,
-        "lora_alpha": cfg.lora_alpha,
-        "target_modules": list(cfg.target_modules),
-        "lora_dropout": cfg.lora_dropout,
-    }
-    with open(f"{save_path}/adapter_config.json", "w") as f:
-        json.dump(adapter_config, f, indent=2)
-
-    print(f"  Saved {len(lora_state)} LoRA tensors to {save_path}")
+    unet_lora_state = convert_state_dict_to_diffusers(get_peft_model_state_dict(peft_unet))
+    StableDiffusionXLPipeline.save_lora_weights(save_path, unet_lora_layers=unet_lora_state)
+    print(f"  Saved {len(unet_lora_state)} LoRA tensors to {save_path}")
 
 
 @app.function(
@@ -368,15 +347,10 @@ def train(run_name: str = "v6", num_epochs: int = 15, repeats: int = 3):
     save_lora_diffusers(unet, adapter_save_path)
 
     # --- Verify saved weights load correctly ---
-    print("Verifying saved weights load...")
-    test_state = safetensors.torch.load_file(f"{adapter_save_path}/adapter_model.safetensors")
-    bad_keys = [k for k in test_state if not k.startswith("unet.")]
-    if bad_keys:
-        print(f"WARNING: {len(bad_keys)} keys missing 'unet.' prefix — loading will silently fail!")
-        for k in bad_keys[:5]:
-            print(f"  {k}")
-    else:
-        print(f"  ✓ All {len(test_state)} keys have 'unet.' prefix (diffusers-compatible)")
+    print("Verifying saved weights...")
+    test_state = safetensors.torch.load_file(f"{adapter_save_path}/pytorch_lora_weights.safetensors")
+    sample_keys = list(test_state.keys())[:3]
+    print(f"  ✓ Saved {len(test_state)} tensors. Sample keys: {sample_keys}")
 
     training_data.commit()
     final_loss = running_loss / max(global_step % 50, 1)
