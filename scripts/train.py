@@ -46,6 +46,7 @@ def save_lora_diffusers(peft_unet, save_path):
     """
     import json
     import safetensors.torch
+    from pathlib import Path
 
     state_dict = peft_unet.state_dict()
     lora_state = {}
