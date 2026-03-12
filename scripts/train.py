@@ -44,7 +44,7 @@ image = (
     volumes={DATA_DIR: training_data, HF_CACHE_DIR: model_cache},
     secrets=[modal.Secret.from_name("huggingface-secret")],
 )
-def train(run_name: str = "v6", num_epochs: int = 30, repeats: int = 3):
+def train(run_name: str = "v6", num_epochs: int = 15, repeats: int = 3):
     import json
     import math
     import random
@@ -316,7 +316,21 @@ def train(run_name: str = "v6", num_epochs: int = 30, repeats: int = 3):
         # End of epoch summary
         print(f"--- Epoch {epoch+1}/{num_epochs} complete (step {global_step}) ---")
 
-    # --- Save LoRA adapter ---
+        # Checkpoint at epochs 5, 9, 12
+        checkpoint_epochs = {5, 9, 12}
+        if (epoch + 1) in checkpoint_epochs:
+            ckpt_path = f"{DATA_DIR}/adapters/{run_name}/checkpoint-epoch{epoch+1}"
+            Path(ckpt_path).mkdir(parents=True, exist_ok=True)
+            ckpt_state = {}
+            for name, param in unet.named_parameters():
+                if param.requires_grad:
+                    ckpt_state[name] = param.data.cpu()
+            safetensors.torch.save_file(ckpt_state, f"{ckpt_path}/pytorch_lora_weights.safetensors")
+            unet.peft_config["default"].save_pretrained(ckpt_path)
+            training_data.commit()
+            print(f"  ** Checkpoint saved to {ckpt_path}")
+
+    # --- Save final LoRA adapter ---
     adapter_save_path = f"{DATA_DIR}/adapters/{run_name}"
     Path(adapter_save_path).mkdir(parents=True, exist_ok=True)
 
@@ -348,7 +362,7 @@ def train(run_name: str = "v6", num_epochs: int = 30, repeats: int = 3):
 
 
 @app.local_entrypoint()
-def main(run_name: str = "v6", num_epochs: int = 30, repeats: int = 3):
+def main(run_name: str = "v6", num_epochs: int = 15, repeats: int = 3):
     result = train.remote(run_name, num_epochs, repeats)
     print("\n" + "=" * 40)
     for k, v in result.items():
