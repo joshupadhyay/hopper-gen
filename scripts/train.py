@@ -1,12 +1,11 @@
 """
 LoRA fine-tuning of SDXL on Edward Hopper paintings via Modal.
 
-Uses diffusers + peft + accelerate for proper mixed-precision training.
-Loads training data from Modal volume, saves LoRA adapter back.
+v6: Battle-tested settings from community guides.
+AdamW 3e-5, constant LR, rank 32/alpha 32, SNR gamma 5, caption dropout 0.05.
 
 Usage:
-    modal run scripts/train.py --run-name v3
-    modal run scripts/train.py --run-name v3 --num-steps 1500 --detach
+    modal run scripts/train.py --run-name v6
 """
 
 import modal
@@ -45,8 +44,10 @@ image = (
     volumes={DATA_DIR: training_data, HF_CACHE_DIR: model_cache},
     secrets=[modal.Secret.from_name("huggingface-secret")],
 )
-def train(run_name: str = "v3", num_steps: int = 1000):
+def train(run_name: str = "v6", num_epochs: int = 30, repeats: int = 3):
     import json
+    import math
+    import random
     import torch
     from pathlib import Path
     from PIL import Image as PILImage
@@ -55,7 +56,6 @@ def train(run_name: str = "v3", num_steps: int = 1000):
     from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
     from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
     from peft import LoraConfig, get_peft_model
-    from diffusers.optimization import get_scheduler
     import safetensors.torch
 
     print(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -66,18 +66,21 @@ def train(run_name: str = "v3", num_steps: int = 1000):
     images_dir = data_path / "processed"
     captions_path = data_path / "captions.jsonl"
 
-    # Load captions
     captions = []
     with open(captions_path) as f:
         for line in f:
             captions.append(json.loads(line))
-    print(f"Training samples: {len(captions)}")
 
-    # --- Load components individually (not via pipeline) ---
+    # Repeat dataset
+    captions_repeated = captions * repeats
+    num_steps = num_epochs * len(captions_repeated)
+    print(f"Training samples: {len(captions)} x {repeats} repeats = {len(captions_repeated)}")
+    print(f"Epochs: {num_epochs}, Total steps: {num_steps}")
+
+    # --- Load components ---
     print("Loading model components...")
 
     noise_scheduler = DDPMScheduler.from_pretrained(MODEL_ID, subfolder="scheduler")
-
     tokenizer_one = CLIPTokenizer.from_pretrained(MODEL_ID, subfolder="tokenizer")
     tokenizer_two = CLIPTokenizer.from_pretrained(MODEL_ID, subfolder="tokenizer_2")
 
@@ -105,17 +108,20 @@ def train(run_name: str = "v3", num_steps: int = 1000):
     text_encoder_two.requires_grad_(False)
     unet.requires_grad_(False)
 
-    # Move frozen models to GPU
     vae.to("cuda")
     text_encoder_one.to("cuda")
     text_encoder_two.to("cuda")
 
-    # --- LoRA config ---
+    # --- LoRA config: rank 32, alpha 32 (1:1 ratio) ---
     lora_config = LoraConfig(
-        r=16,
+        r=32,
         lora_alpha=32,
+        lora_dropout=0.0,
         init_lora_weights="gaussian",
-        target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        target_modules=[
+            "to_k", "to_q", "to_v", "to_out.0",
+            "ff.net.0.proj", "ff.net.2",
+        ],
     )
     unet = get_peft_model(unet, lora_config)
     unet.print_trainable_parameters()
@@ -143,34 +149,39 @@ def train(run_name: str = "v3", num_steps: int = 1000):
             img = PILImage.open(self.img_dir / entry["file_name"]).convert("RGB")
             return {"pixel_values": img_transform(img), "caption": entry["text"]}
 
-    dataset = HopperDataset(captions, images_dir)
+    dataset = HopperDataset(captions_repeated, images_dir)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
     # --- Pre-compute latents and text embeddings ---
     print("Pre-computing latents and text embeddings...")
-    cached_data = []
 
-    # Upcast VAE to fp32 for stable encoding (SDXL VAE is known to overflow in fp16)
+    # Upcast VAE to fp32 (SDXL VAE overflows in fp16)
     vae.to(dtype=torch.float32)
 
-    for batch in dataloader:
-        pixel_values = batch["pixel_values"].to("cuda", dtype=torch.float32)
-        caption = batch["caption"]
+    # Cache unique images only (not repeats)
+    latent_cache = {}
+    embed_cache = {}
+
+    for entry in captions:
+        fname = entry["file_name"]
+        caption = entry["text"]
+
+        img = PILImage.open(images_dir / fname).convert("RGB")
+        pixel_values = img_transform(img).unsqueeze(0).to("cuda", dtype=torch.float32)
 
         with torch.no_grad():
-            # Encode image (fp32 to avoid NaN)
             latents = vae.encode(pixel_values).latent_dist.sample()
             latents = latents * vae.config.scaling_factor
+            latent_cache[fname] = latents.cpu()
 
-            # Encode text with both CLIP models
             tok1 = tokenizer_one(
-                caption, padding="max_length",
+                [caption], padding="max_length",
                 max_length=tokenizer_one.model_max_length,
                 truncation=True, return_tensors="pt",
             ).input_ids.to("cuda")
 
             tok2 = tokenizer_two(
-                caption, padding="max_length",
+                [caption], padding="max_length",
                 max_length=tokenizer_two.model_max_length,
                 truncation=True, return_tensors="pt",
             ).input_ids.to("cuda")
@@ -178,102 +189,74 @@ def train(run_name: str = "v3", num_steps: int = 1000):
             enc1_out = text_encoder_one(tok1, output_hidden_states=True)
             enc2_out = text_encoder_two(tok2, output_hidden_states=True)
 
-            # SDXL concatenates penultimate hidden states from both encoders
             prompt_embeds = torch.cat([
                 enc1_out.hidden_states[-2],
                 enc2_out.hidden_states[-2],
             ], dim=-1).to(dtype=torch.float32)
 
-            # Pooled output from second text encoder
             pooled = enc2_out.text_embeds.to(dtype=torch.float32)
 
-        cached_data.append({
-            "latents": latents.cpu(),
-            "prompt_embeds": prompt_embeds.cpu(),
-            "pooled": pooled.cpu(),
-        })
+            embed_cache[fname] = {
+                "prompt_embeds": prompt_embeds.cpu(),
+                "pooled": pooled.cpu(),
+            }
 
-    print(f"Cached {len(cached_data)} samples")
+    print(f"Cached {len(latent_cache)} unique images")
 
     # Free encoder VRAM
     del vae, text_encoder_one, text_encoder_two
     torch.cuda.empty_cache()
-    vram_used = torch.cuda.memory_allocated() / 1e9
-    print(f"VRAM after freeing encoders: {vram_used:.1f} GB")
+    print(f"VRAM after freeing encoders: {torch.cuda.memory_allocated() / 1e9:.1f} GB")
 
-    # --- Optimizer ---
+    # --- Optimizer: AdamW, constant LR 3e-5, no warmup ---
     trainable_params = [p for p in unet.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_params, lr=1e-4, weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(trainable_params, lr=3e-5, weight_decay=0.01)
 
-    lr_scheduler = get_scheduler(
-        "cosine",
-        optimizer=optimizer,
-        num_warmup_steps=50,
-        num_training_steps=num_steps,
-    )
-
-    # SDXL time IDs: [orig_h, orig_w, crop_top, crop_left, target_h, target_w]
+    # SDXL time IDs
     add_time_ids = torch.tensor(
         [[1024, 1024, 0, 0, 1024, 1024]], dtype=torch.float32, device="cuda"
     )
 
-    # --- Sanity check: verify UNet + inputs before training ---
-    print("\nRunning sanity check...")
-    test_cached = cached_data[0]
-    test_latents = test_cached["latents"].to("cuda")
-    test_embeds = test_cached["prompt_embeds"].to("cuda")
-    test_pooled = test_cached["pooled"].to("cuda")
+    # SNR gamma for Min-SNR weighting (improves convergence)
+    snr_gamma = 5.0
 
-    print(f"  latents: shape={test_latents.shape} dtype={test_latents.dtype} has_nan={test_latents.isnan().any()} range=[{test_latents.min():.3f}, {test_latents.max():.3f}]")
-    print(f"  prompt_embeds: shape={test_embeds.shape} dtype={test_embeds.dtype} has_nan={test_embeds.isnan().any()} range=[{test_embeds.min():.3f}, {test_embeds.max():.3f}]")
-    print(f"  pooled: shape={test_pooled.shape} dtype={test_pooled.dtype} has_nan={test_pooled.isnan().any()} range=[{test_pooled.min():.3f}, {test_pooled.max():.3f}]")
+    def compute_snr(timesteps):
+        """Compute signal-to-noise ratio for Min-SNR weighting."""
+        alphas_cumprod = noise_scheduler.alphas_cumprod.to(timesteps.device)
+        sqrt_alphas_cumprod = alphas_cumprod[timesteps] ** 0.5
+        sqrt_one_minus_alphas_cumprod = (1.0 - alphas_cumprod[timesteps]) ** 0.5
+        snr = (sqrt_alphas_cumprod / sqrt_one_minus_alphas_cumprod) ** 2
+        return snr
 
-    # Check UNet weights for NaN
-    nan_params = 0
-    for name, p in unet.named_parameters():
-        if p.isnan().any():
-            print(f"  NaN in UNet param: {name}")
-            nan_params += 1
-    print(f"  UNet params with NaN: {nan_params}")
+    # Caption dropout rate
+    caption_dropout_rate = 0.05
 
-    # Test forward pass
-    unet.eval()
-    with torch.no_grad():
-        test_noise = torch.randn_like(test_latents)
-        test_ts = torch.tensor([500], device="cuda").long()
-        test_noisy = noise_scheduler.add_noise(test_latents, test_noise, test_ts)
-        print(f"  noisy_latents: has_nan={test_noisy.isnan().any()} range=[{test_noisy.min():.3f}, {test_noisy.max():.3f}]")
-
-        test_pred = unet(
-            test_noisy,
-            test_ts,
-            encoder_hidden_states=test_embeds,
-            added_cond_kwargs={"text_embeds": test_pooled, "time_ids": add_time_ids},
-            return_dict=False,
-        )[0]
-        print(f"  test_pred: has_nan={test_pred.isnan().any()} range=[{test_pred.min():.3f}, {test_pred.max():.3f}]")
-
-    if test_pred.isnan().any():
-        print("\nERROR: UNet produces NaN even in eval mode. Aborting.")
-        return {"error": "UNet produces NaN in eval", "run_name": run_name}
+    # Build training order (all repeats × epochs, shuffled per epoch)
+    training_entries = captions_repeated
 
     # --- Training ---
     unet.train()
     optimizer.zero_grad()
 
-    print(f"\nStarting training for {num_steps} steps...")
+    print(f"\nStarting training: {num_epochs} epochs, {num_steps} steps")
+    print(f"Config: AdamW lr=3e-5 constant | rank=32 alpha=32 | SNR gamma={snr_gamma} | caption dropout={caption_dropout_rate}")
     global_step = 0
     running_loss = 0.0
-    grad_accum_steps = 4
 
-    while global_step < num_steps:
-        for cached in cached_data:
-            if global_step >= num_steps:
-                break
+    for epoch in range(num_epochs):
+        random.shuffle(training_entries)
 
-            latents = cached["latents"].to("cuda")
-            prompt_embeds = cached["prompt_embeds"].to("cuda")
-            pooled = cached["pooled"].to("cuda")
+        for entry in training_entries:
+            fname = entry["file_name"]
+
+            latents = latent_cache[fname].to("cuda")
+            prompt_embeds = embed_cache[fname]["prompt_embeds"].to("cuda")
+            pooled = embed_cache[fname]["pooled"].to("cuda")
+
+            # Caption dropout: randomly use empty embeddings
+            if random.random() < caption_dropout_rate:
+                prompt_embeds = torch.zeros_like(prompt_embeds)
+                pooled = torch.zeros_like(pooled)
 
             # Sample noise and timesteps
             noise = torch.randn_like(latents)
@@ -282,7 +265,6 @@ def train(run_name: str = "v3", num_steps: int = 1000):
                 (latents.shape[0],), device="cuda",
             ).long()
 
-            # Add noise to latents
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
             # Predict noise
@@ -297,46 +279,47 @@ def train(run_name: str = "v3", num_steps: int = 1000):
                 return_dict=False,
             )[0]
 
-            # MSE loss against noise target
-            loss = torch.nn.functional.mse_loss(model_pred, noise, reduction="mean")
+            # MSE loss with Min-SNR weighting
+            loss = torch.nn.functional.mse_loss(model_pred, noise, reduction="none")
+            loss = loss.mean(dim=list(range(1, len(loss.shape))))  # per-sample loss
+
+            # Apply Min-SNR gamma weighting
+            snr = compute_snr(timesteps)
+            snr_weight = torch.clamp(snr, max=snr_gamma) / snr
+            loss = (loss * snr_weight).mean()
+
             loss_val = loss.item()
 
-            # Check for NaN
             if global_step == 0:
-                print(f"  First loss value: {loss_val:.6f}")
-                if loss_val != loss_val:  # NaN check
-                    print("ERROR: NaN loss on first step!")
-                    print(f"  model_pred stats: min={model_pred.min():.4f} max={model_pred.max():.4f} mean={model_pred.mean():.4f}")
-                    print(f"  noise stats: min={noise.min():.4f} max={noise.max():.4f}")
-                    print(f"  noisy_latents dtype: {noisy_latents.dtype}")
-                    print(f"  model_pred dtype: {model_pred.dtype}")
+                print(f"  First loss: {loss_val:.6f}")
+                if loss_val != loss_val:
+                    print("ERROR: NaN on first step!")
                     return {"error": "NaN loss", "run_name": run_name}
 
-            # Scale loss for gradient accumulation
-            scaled_loss = loss / grad_accum_steps
-            scaled_loss.backward()
+            loss.backward()
+
+            # Step optimizer every step (batch_size=1, no grad accumulation)
+            torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
 
             running_loss += loss_val
             global_step += 1
 
-            if global_step % grad_accum_steps == 0:
-                torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-
             if global_step % 50 == 0:
                 avg_loss = running_loss / 50
-                lr = optimizer.param_groups[0]["lr"]
                 vram_now = torch.cuda.memory_allocated() / 1e9
-                print(f"Step {global_step}/{num_steps} | Loss: {avg_loss:.4f} | LR: {lr:.2e} | VRAM: {vram_now:.1f}GB")
+                progress = global_step / num_steps * 100
+                print(f"Step {global_step}/{num_steps} ({progress:.0f}%) | Epoch {epoch+1}/{num_epochs} | Loss: {avg_loss:.4f} | VRAM: {vram_now:.1f}GB")
                 running_loss = 0.0
+
+        # End of epoch summary
+        print(f"--- Epoch {epoch+1}/{num_epochs} complete (step {global_step}) ---")
 
     # --- Save LoRA adapter ---
     adapter_save_path = f"{DATA_DIR}/adapters/{run_name}"
     Path(adapter_save_path).mkdir(parents=True, exist_ok=True)
 
-    # Save LoRA weights
     lora_state_dict = {}
     for name, param in unet.named_parameters():
         if param.requires_grad:
@@ -347,16 +330,17 @@ def train(run_name: str = "v3", num_steps: int = 1000):
         f"{adapter_save_path}/pytorch_lora_weights.safetensors",
     )
 
-    # Save PEFT config
     unet.peft_config["default"].save_pretrained(adapter_save_path)
 
     training_data.commit()
     final_loss = running_loss / max(global_step % 50, 1)
     print(f"\nTraining complete! Adapter saved to {adapter_save_path}")
     print(f"Final avg loss: {final_loss:.4f}")
+    print(f"Total steps: {global_step}")
 
     return {
         "run_name": run_name,
+        "epochs": num_epochs,
         "steps": global_step,
         "final_loss": final_loss,
         "adapter_path": adapter_save_path,
@@ -364,8 +348,8 @@ def train(run_name: str = "v3", num_steps: int = 1000):
 
 
 @app.local_entrypoint()
-def main(run_name: str = "v3", num_steps: int = 1000):
-    result = train.remote(run_name, num_steps)
+def main(run_name: str = "v6", num_epochs: int = 30, repeats: int = 3):
+    result = train.remote(run_name, num_epochs, repeats)
     print("\n" + "=" * 40)
     for k, v in result.items():
         print(f"  {k}: {v}")
