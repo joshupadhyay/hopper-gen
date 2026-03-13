@@ -75,6 +75,10 @@ class SDXLGenerator:
     def init(self):
         import torch
         from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
+
+        # TF32 for faster matmul on Ampere GPUs (A10G)
+        torch.backends.cuda.matmul.allow_tf32 = True
+
         print(f"Loading SDXL pipeline...")
         self.pipeline = StableDiffusionXLPipeline.from_pretrained(
             MODEL_ID,
@@ -84,14 +88,12 @@ class SDXLGenerator:
         ).to("cuda")
         model_cache.commit()
 
-        ## === Optimizations, from the Modal blogpost
+        ## === Optimizations
         self.pipeline.fuse_qkv_projections(vae=False)
 
-        # torch.compile on SDXL UNet:
-        # - "max-autotune" crashes (FakeTensor device propagation error, cpu/cuda mismatch)
-        # - "default" runs but adds ~100s overhead per call (recompilation on each step)
-        # Disabled until torch/diffusers versions fix SDXL compatibility.
-        # self.pipeline.unet = torch.compile(self.pipeline.unet, mode="default")
+        # Regional compilation: compiles only BasicTransformerBlock instances
+        # 8-10x faster compile than full torch.compile, same runtime speedup
+        self.pipeline.unet.compile_repeated_blocks(fullgraph=True)
 
     @modal.method()
     def generate(

@@ -6,7 +6,7 @@ SDXLGenerator = modal.Cls.from_name("Optimized-Generate-Hopper", "SDXLGenerator"
 instance = SDXLGenerator()
 
 result = instance.generate.remote(
-    prompt="hopper style painting, a city at nighttime, busy street with a taxi, a few cars, and a couple walking on the sidewalk, lampposts visible, buildings in the skyline, warm artificial light, muted colors",
+    prompt="hopper style sunny day at the pool",
     run_name="v12",
     seed=42,
 )
