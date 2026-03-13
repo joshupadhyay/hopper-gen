@@ -64,7 +64,7 @@ MINUTES = 60 # 60s
     image=image,
     gpu="A10G",
     scaledown_window= 5 * MINUTES, # scale down after 5 min of inactivity
-    timeout=6 * MINUTES,
+    timeout=15 * MINUTES,
     volumes={DATA_DIR: training_data, HF_CACHE_DIR: model_cache},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     enable_memory_snapshot=True,
@@ -84,13 +84,14 @@ class SDXLGenerator:
         ).to("cuda")
         model_cache.commit()
 
-        ## === Optimzations, from the Modal blogpost
+        ## === Optimizations, from the Modal blogpost
         self.pipeline.fuse_qkv_projections(vae=False)
 
-        ## Explain Torch Compile in the blog post
-
-        ## return compiled pipeline 
-        self.pipeline = torch.compile(self.pipeline, mode="max-autotune")
+        # torch.compile on SDXL UNet:
+        # - "max-autotune" crashes (FakeTensor device propagation error, cpu/cuda mismatch)
+        # - "default" runs but adds ~100s overhead per call (recompilation on each step)
+        # Disabled until torch/diffusers versions fix SDXL compatibility.
+        # self.pipeline.unet = torch.compile(self.pipeline.unet, mode="default")
 
     @modal.method()
     def generate(
@@ -160,9 +161,6 @@ class SDXLGenerator:
             print(f"  Generated image {i + 1}/{num_images}")
 
         if use_lora:
-            # Claude explained that this is a static type error, because torch.compile() returns OptimizedModule
-            ## at runtime, there's a __getattr__ that forwards the func call to the actual object its wrapped
-            # So while static types fail, this should work at runtime.
             self.pipeline.unload_lora_weights()
 
         return images_bytes
