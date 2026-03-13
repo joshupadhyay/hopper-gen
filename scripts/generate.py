@@ -132,6 +132,8 @@ def generate(
         images_bytes.append(buf.getvalue())
         print(f"  Generated image {i + 1}/{num_images}")
 
+
+
     return images_bytes
 
 
