@@ -116,11 +116,44 @@ Based on [HuggingFace fast_diffusion tutorial](https://huggingface.co/docs/diffu
 - The inductor config flags guide kernel selection for SDXL's architecture
 - channels_last aligns memory layout with how convolutions actually access data
 
-**Expected outcome:**
-- First snapshot creation: very slow (minutes) — torch.compile JIT tracing the full UNet
-- Snapshot restore: should capture compiled CUDA kernels (the main reason snapshots exist)
-- Warm inference: potentially ~12-13s (down from 17.7s) if compile works
-- If it crashes: revert to v2 (tf32 + compile_repeated_blocks)
+**torch.compile modes tested:**
+
+| | `reduce-overhead` | `max-autotune` |
+|---|---|---|
+| CUDA graphs | Yes | Yes |
+| Kernel selection | Default "good enough" kernels | Benchmarks 7-8 candidates per op, picks fastest |
+| Compile time | ~1-3 min | ~10-20 min |
+| Runtime speed | ~90-95% of max-autotune | 100% (best possible) |
+
+`max-autotune` timed out at 15 minutes (Modal's function timeout) — the per-op benchmarking on SDXL's hundreds of unique ops exceeds 900s on A10G. Switched to `reduce-overhead` which gives the same CUDA graph replay benefit without exhaustive kernel search. The ~5-10% kernel optimization gap is not worth 10x longer compile times.
+
+**torch.compile + LoRA incompatibility (critical finding):**
+
+`torch.compile` is fundamentally incompatible with dynamic LoRA loading. `load_lora_weights()` mutates the model weights, which invalidates the compiled CUDA graph and forces a full recompile (~3 min) on every `generate()` call. Even with a warmup pass in `@modal.enter(snap=True)`, the compiled graph only applies to the base model — loading LoRA after snapshot restore triggers recompilation.
+
+Results:
+- `max-autotune`: timed out at 15min (exhaustive per-op benchmarking too slow for A10G)
+- `reduce-overhead`: compiled successfully, but 186s per warm call (recompile on every LoRA load)
+- Both modes unusable with our LoRA load/unload pattern
+
+**Final v3 config (what we kept):**
+
+Dropped torch.compile entirely. Kept bfloat16 + channels_last + tf32 + compile_repeated_blocks.
+
+- First run (snapshot creation): 60.4s
+- Warm: **18.9s** (down from 21s with fp16, 17.7s with fp16 + tf32 only)
+- Quality: identical to fp16, Hopper style preserved
+
+**Cumulative optimization journey:**
+
+| Version | Config | Warm Time | vs Baseline |
+|---|---|---|---|
+| Baseline | fp16, no optimizations | ~21s | — |
+| v2 | fp16 + tf32 + compile_repeated_blocks | 17.7s | 16% faster |
+| v3 | bf16 + channels_last + tf32 + compile_repeated_blocks | 18.9s | 10% faster |
+| v3 (expected) | torch.compile reduce-overhead | ~12-13s | blocked by LoRA |
+
+Note: v3 is slightly slower than v2 (18.9s vs 17.7s). bfloat16 may have higher per-op overhead than fp16 on A10G despite better numerical properties. channels_last benefit may not offset this. Consider reverting to fp16 + tf32 + compile_repeated_blocks (v2) as the final config.
 
 **HF tutorial benchmarks (A100 80GB):**
 | Optimization | Time | Cumulative Speedup |
@@ -133,3 +166,10 @@ Based on [HuggingFace fast_diffusion tutorial](https://huggingface.co/docs/diffu
 | + int8 quantization | 2.43s | 67% |
 
 Note: A100 is much more powerful than our A10G. Absolute numbers will differ, but relative speedups should be similar.
+
+## Useful References
+
+- [HuggingFace fast_diffusion tutorial](https://huggingface.co/docs/diffusers/main/en/tutorials/fast_diffusion) — bfloat16, torch.compile, channels_last, int8 quantization. Source for v3 optimization changes.
+- [Modal's FLUX 3x faster blog post](https://modal.com/blog/flux-3x-faster) — GPU snapshots, compile, TEACache. Source for v1 snapshot architecture.
+- [diffusers `train_dreambooth_lora_sdxl.py`](https://github.com/huggingface/diffusers/blob/main/examples/dreambooth/train_dreambooth_lora_sdxl.py) — official LoRA save pattern
+- [GitHub issue #6392](https://github.com/huggingface/diffusers/issues/6392) — `base_model.model.` prefix mismatch bug

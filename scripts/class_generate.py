@@ -64,7 +64,7 @@ MINUTES = 60 # 60s
     image=image,
     gpu="A10G",
     scaledown_window= 5 * MINUTES, # scale down after 5 min of inactivity
-    timeout=15 * MINUTES,
+    timeout=30 * MINUTES,
     volumes={DATA_DIR: training_data, HF_CACHE_DIR: model_cache},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     enable_memory_snapshot=True,
@@ -78,12 +78,6 @@ class SDXLGenerator:
 
         # TF32 for faster matmul on Ampere GPUs (A10G)
         torch.backends.cuda.matmul.allow_tf32 = True
-
-        # Inductor config for torch.compile (from HF fast_diffusion tutorial)
-        torch._inductor.config.conv_1x1_as_mm = True
-        torch._inductor.config.coordinate_descent_tuning = True
-        torch._inductor.config.epilogue_fusion = False
-        torch._inductor.config.coordinate_descent_check_all_directions = True
 
         print(f"Loading SDXL pipeline in bfloat16...")
         self.pipeline = StableDiffusionXLPipeline.from_pretrained(
@@ -100,15 +94,11 @@ class SDXLGenerator:
         self.pipeline.unet.to(memory_format=torch.channels_last)
         self.pipeline.vae.to(memory_format=torch.channels_last)
 
-        # Full torch.compile on UNet (runs 50x per image — biggest speedup)
-        # and VAE decode (runs once — minor speedup)
-        # Using max-autotune for CUDA graph optimization
-        self.pipeline.unet = torch.compile(
-            self.pipeline.unet, mode="max-autotune", fullgraph=True
-        )
-        self.pipeline.vae.decode = torch.compile(
-            self.pipeline.vae.decode, mode="max-autotune", fullgraph=True
-        )
+        # Regional compilation: compiles BasicTransformerBlock instances
+        # Full torch.compile is incompatible with dynamic LoRA loading —
+        # load_lora_weights mutates the model, invalidating the compiled graph
+        # and forcing a full recompile (~3 min) on every generate() call.
+        self.pipeline.unet.compile_repeated_blocks(fullgraph=True)
 
     @modal.method()
     def generate(
