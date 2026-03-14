@@ -91,3 +91,45 @@ The ~25s gap between cold and warm is Modal overhead: container allocation, imag
 - **Warm execution identical** — both ~21s. Inference speed is the same since `torch.compile` is disabled.
 - **`torch.compile` not contributing** — disabled due to SDXL compatibility issues (device propagation error). `fuse_qkv_projections` is active but effect is within noise.
 - **`scaledown_window` (5 min)** is the biggest practical win for interactive use — keeps container warm for back-to-back generations at ~21s.
+
+### v2: tf32 + compile_repeated_blocks (kept)
+
+Added `torch.backends.cuda.matmul.allow_tf32 = True` and `pipeline.unet.compile_repeated_blocks(fullgraph=True)`.
+Warm execution dropped from ~21s to ~17.7s (16% faster) with no quality impact.
+
+Also tried reducing steps 50→35 and `fuse_lora(lora_scale=1.2)` — both degraded image quality (color/style regression). Reverted those, kept tf32 + regional compilation.
+
+### v3: bfloat16 + torch.compile (testing)
+
+Based on [HuggingFace fast_diffusion tutorial](https://huggingface.co/docs/diffusers/main/en/tutorials/fast_diffusion).
+
+**Changes:**
+- **fp16 → bfloat16** — wider exponent range, fewer overflows, better torch.compile compatibility. Same model size (both 16-bit). Removed `variant="fp16"` since there's no bf16 variant on HF (loads fp32 and casts).
+- **Inductor config flags** — `conv_1x1_as_mm`, `coordinate_descent_tuning`, `epilogue_fusion=False`, `coordinate_descent_check_all_directions`. These tune the torch.compile kernel selection.
+- **channels_last memory format** — `unet.to(memory_format=torch.channels_last)` and same for VAE. Better GPU memory access patterns for convolutions.
+- **Full torch.compile on UNet** — `torch.compile(unet, mode="max-autotune", fullgraph=True)`. Previously crashed with FakeTensor error in fp16. bfloat16 may avoid this.
+- **torch.compile on VAE decode** — minor win (runs once per image), but free to add.
+- **Removed compile_repeated_blocks** — replaced by full torch.compile.
+
+**Why this might work now (when fp16 torch.compile crashed before):**
+- bfloat16 handles the numerical edge cases that caused FakeTensor device propagation errors
+- The inductor config flags guide kernel selection for SDXL's architecture
+- channels_last aligns memory layout with how convolutions actually access data
+
+**Expected outcome:**
+- First snapshot creation: very slow (minutes) — torch.compile JIT tracing the full UNet
+- Snapshot restore: should capture compiled CUDA kernels (the main reason snapshots exist)
+- Warm inference: potentially ~12-13s (down from 17.7s) if compile works
+- If it crashes: revert to v2 (tf32 + compile_repeated_blocks)
+
+**HF tutorial benchmarks (A100 80GB):**
+| Optimization | Time | Cumulative Speedup |
+|---|---|---|
+| Baseline (fp32) | 7.36s | — |
+| bfloat16 | 4.63s | 37% |
+| + SDPA (default) | 3.31s | 55% |
+| + torch.compile max-autotune | 2.54s | 65% |
+| + fuse_qkv | 2.52s | 66% |
+| + int8 quantization | 2.43s | 67% |
+
+Note: A100 is much more powerful than our A10G. Absolute numbers will differ, but relative speedups should be similar.

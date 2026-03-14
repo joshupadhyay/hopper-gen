@@ -79,11 +79,16 @@ class SDXLGenerator:
         # TF32 for faster matmul on Ampere GPUs (A10G)
         torch.backends.cuda.matmul.allow_tf32 = True
 
-        print(f"Loading SDXL pipeline...")
+        # Inductor config for torch.compile (from HF fast_diffusion tutorial)
+        torch._inductor.config.conv_1x1_as_mm = True
+        torch._inductor.config.coordinate_descent_tuning = True
+        torch._inductor.config.epilogue_fusion = False
+        torch._inductor.config.coordinate_descent_check_all_directions = True
+
+        print(f"Loading SDXL pipeline in bfloat16...")
         self.pipeline = StableDiffusionXLPipeline.from_pretrained(
             MODEL_ID,
-            torch_dtype=torch.float16,
-            variant="fp16",
+            torch_dtype=torch.bfloat16,
             use_safetensors=True,
         ).to("cuda")
         model_cache.commit()
@@ -91,9 +96,19 @@ class SDXLGenerator:
         ## === Optimizations
         self.pipeline.fuse_qkv_projections(vae=False)
 
-        # Regional compilation: compiles only BasicTransformerBlock instances
-        # 8-10x faster compile than full torch.compile, same runtime speedup
-        self.pipeline.unet.compile_repeated_blocks(fullgraph=True)
+        # channels_last memory format for better GPU utilization
+        self.pipeline.unet.to(memory_format=torch.channels_last)
+        self.pipeline.vae.to(memory_format=torch.channels_last)
+
+        # Full torch.compile on UNet (runs 50x per image — biggest speedup)
+        # and VAE decode (runs once — minor speedup)
+        # Using max-autotune for CUDA graph optimization
+        self.pipeline.unet = torch.compile(
+            self.pipeline.unet, mode="max-autotune", fullgraph=True
+        )
+        self.pipeline.vae.decode = torch.compile(
+            self.pipeline.vae.decode, mode="max-autotune", fullgraph=True
+        )
 
     @modal.method()
     def generate(
