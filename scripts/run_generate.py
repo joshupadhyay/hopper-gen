@@ -1,4 +1,4 @@
-"""Call the deployed Hopper generator with memory snapshots."""
+"""Call the deployed Hopper generator with the finalized low-variance path."""
 import modal
 from pathlib import Path
 
