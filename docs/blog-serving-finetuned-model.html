@@ -1,0 +1,1019 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fine-tuning Stable Diffusion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ── Reset & Base ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html {
+    scroll-behavior: smooth;
+    background: #f5f0e8;
+    color: #2d2a26;
+    font-family: 'Inter', sans-serif;
+    font-size: 16px;
+    line-height: 1.75;
+  }
+
+  body { position: relative; }
+
+  /* ── Reading Progress Bar ── */
+  #progress-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 3px;
+    width: 0%;
+    background: #1a6b5a;
+    z-index: 9999;
+    transition: width 0.1s linear;
+  }
+
+  /* ── Layout ── */
+  .container {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 1.5rem;
+  }
+
+  section {
+    padding: 3rem 0;
+  }
+
+  section + section {
+    border-top: 1px solid #d4c8b8;
+  }
+
+  /* ── Typography ── */
+  h1, h2, h3, h4 {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 600;
+    color: #2d2a26;
+  }
+
+  h1 {
+    font-size: 3rem;
+    line-height: 1.15;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+  }
+
+  h2 {
+    font-size: 2rem;
+    line-height: 1.3;
+    margin-bottom: 1rem;
+  }
+
+  h3 {
+    font-size: 1.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  p {
+    margin-bottom: 1.25rem;
+  }
+
+  .subtitle {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 1.35rem;
+    font-style: italic;
+    color: #6b5e50;
+    margin-bottom: 1rem;
+  }
+
+  .author {
+    font-size: 0.85rem;
+    color: #9a8e7e;
+    margin-bottom: 2rem;
+  }
+
+  .secondary-text {
+    color: #6b5e50;
+  }
+
+  .muted-text {
+    color: #9a8e7e;
+  }
+
+  code, .mono {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+    font-size: 0.88em;
+    background: rgba(45, 42, 38, 0.06);
+    padding: 0.15em 0.4em;
+    border-radius: 3px;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    padding-top: 6rem;
+    padding-bottom: 3rem;
+    border-bottom: 1px solid #d4c8b8;
+  }
+
+  /* ── Reveal Animation ── */
+  .reveal {
+    opacity: 0;
+    transform: translateY(20px);
+    transition: opacity 0.7s ease, transform 0.7s ease;
+  }
+
+  .reveal.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* ── Stub Placeholders ── */
+  .stub-placeholder {
+    border: 2px dashed #d4c8b8;
+    border-radius: 8px;
+    padding: 2.5rem 2rem;
+    text-align: center;
+    color: #9a8e7e;
+    font-style: italic;
+    margin: 1.5rem 0;
+    background: rgba(212, 200, 184, 0.12);
+  }
+
+  /* ── Chart Containers ── */
+  .chart-container {
+    max-width: 640px;
+    margin: 2rem auto;
+    position: relative;
+  }
+
+  .chart-container svg {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+
+  /* ── Tooltip ── */
+  .chart-tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: #2d2a26;
+    color: #f5f0e8;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    padding: 0.5rem 0.75rem;
+    border-radius: 5px;
+    z-index: 1000;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    max-width: 260px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  }
+
+  .chart-tooltip.show {
+    opacity: 1;
+  }
+
+  /* ── Callout ── */
+  .callout {
+    border-left: 3px solid #1a6b5a;
+    padding: 1rem 1.25rem;
+    margin: 1.5rem 0;
+    background: rgba(26, 107, 90, 0.04);
+    border-radius: 0 6px 6px 0;
+  }
+
+  .callout p:last-child {
+    margin-bottom: 0;
+  }
+
+  /* ── Image Comparison Slider (infrastructure) ── */
+  .comparison-slider {
+    position: relative;
+    overflow: hidden;
+    border-radius: 8px;
+    cursor: ew-resize;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .comparison-slider .img-layer {
+    display: block;
+    width: 100%;
+  }
+
+  .comparison-slider .img-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .comparison-slider .img-overlay img {
+    display: block;
+    height: 100%;
+    width: auto;
+    max-width: none;
+  }
+
+  .comparison-slider .slider-handle {
+    position: absolute;
+    top: 0;
+    width: 3px;
+    height: 100%;
+    background: #f5f0e8;
+    box-shadow: 0 0 6px rgba(0,0,0,0.3);
+    cursor: ew-resize;
+    z-index: 10;
+  }
+
+  .comparison-slider .slider-handle::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 32px;
+    height: 32px;
+    background: #f5f0e8;
+    border-radius: 50%;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  }
+
+  .comparison-slider .slider-label {
+    position: absolute;
+    bottom: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #f5f0e8;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+    padding: 0.2em 0.6em;
+    background: rgba(0,0,0,0.35);
+    border-radius: 3px;
+  }
+
+  .comparison-slider .label-left { left: 12px; }
+  .comparison-slider .label-right { right: 12px; }
+
+  /* ── Summary List ── */
+  .summary-list {
+    list-style: none;
+    padding: 0;
+    margin: 1.25rem 0;
+  }
+
+  .summary-list li {
+    padding: 0.4rem 0 0.4rem 1.5rem;
+    position: relative;
+  }
+
+  .summary-list li::before {
+    content: '—';
+    position: absolute;
+    left: 0;
+    color: #9a8e7e;
+  }
+
+  /* ── Embed Slot ── */
+  #hopper-embed {
+    border: 2px dashed #d4c8b8;
+    border-radius: 8px;
+    padding: 3rem 2rem;
+    text-align: center;
+    color: #9a8e7e;
+    margin: 1.5rem 0;
+    min-height: 400px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(212, 200, 184, 0.08);
+  }
+
+  /* ── Bar animation ── */
+  .bar-rect {
+    transform-origin: bottom;
+    transform: scaleY(0);
+    transition: transform 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .bar-rect.animate {
+    transform: scaleY(1);
+  }
+
+  /* ── Scatter point animation ── */
+  .scatter-point {
+    opacity: 0;
+    transition: opacity 0.6s ease;
+  }
+
+  .scatter-point.animate {
+    opacity: 1;
+  }
+
+  /* ── Variance point pulse ── */
+  @keyframes pulse {
+    0%, 100% { r: 5; }
+    50% { r: 8; }
+  }
+
+  .variance-point.animate {
+    animation: pulse 0.6s ease 1;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 600px) {
+    h1 { font-size: 2.2rem; }
+    h2 { font-size: 1.6rem; }
+    .subtitle { font-size: 1.1rem; }
+    section { padding: 2rem 0; }
+    .hero { padding-top: 4rem; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Reading Progress Bar -->
+<div id="progress-bar"></div>
+
+<!-- Tooltip (shared) -->
+<div class="chart-tooltip" id="chart-tooltip"></div>
+
+<!-- Hero -->
+<header class="hero">
+  <div class="container">
+    <h1>Fine-tuning Stable Diffusion</h1>
+    <p class="subtitle">From training to deployment — an optimization story</p>
+    <p class="author">Josh Upadhyay &middot; March 2026</p>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- Section 3: What's fine-tuning -->
+  <section class="reveal">
+    <h2>What's fine-tuning?</h2>
+    <p>
+      Large image generation models like Stable Diffusion XL ship with broad, general-purpose knowledge — they can render nearly any scene you describe. But "general" means "generic." If you want a model that consistently captures a specific visual style, prompting gets you only so far. You can describe the style you want in the prompt and get decent results, but some visual signatures — the way light pools on a countertop, the specific geometry of a lonely urban scene — are hard to encode in text. Fine-tuning bakes that knowledge directly into the model weights.
+    </p>
+
+    <h3>Why fine-tune at all?</h3>
+    <p>
+      Prompting is powerful. You can write "in the style of Edward Hopper" and get something Hopper-adjacent. But there are limits: the model's concept of "Hopper" is whatever its pretraining dataset contained, which may be shallow or inconsistent. Fine-tuning on a curated set of actual Hopper paintings teaches the model <em>specific</em> patterns — how he handled lamplight, how his compositions frame solitude, how his palette shifts between indoor and outdoor scenes. The model doesn't just reference the style; it internalizes it.
+    </p>
+
+    <h3>LoRA: the core idea</h3>
+    <p>
+      Instead of updating all 6.6 billion parameters during training, <code>LoRA</code> (Low-Rank Adaptation) freezes the pretrained weights and injects small trainable matrices into specific layers. These matrices are low-rank decompositions — a weight update matrix <em>W</em> is approximated as the product of two much smaller matrices <em>A</em> and <em>B</em>, where <em>A</em> is <span class="mono">(d &times; r)</span> and <em>B</em> is <span class="mono">(r &times; d)</span>, and <em>r</em> (the rank) is tiny compared to <em>d</em>.
+    </p>
+    <p>
+      The result: you train roughly 0.1% of the total parameters, use a fraction of the memory, and the resulting adapter file is small enough to swap in and out at inference time. At deployment, the adapter weights merge into the base model, and the pipeline behaves as if it were a single fine-tuned model.
+    </p>
+
+    <h3>Edward Hopper as the target</h3>
+    <p>
+      The target style is Edward Hopper — the American realist painter known for warm lamplight, lonely diners, cinematic urban geometry, and that unmistakable sense of stillness. The training set was a collection of Hopper paintings and reproductions, and the goal was to get SDXL to reliably produce images that feel like they belong in his portfolio. Not pastiche — internalized understanding of how Hopper saw light and space.
+    </p>
+  </section>
+
+  <!-- Section 4: Fine-tuning results — STUB -->
+  <!-- TODO: Fine-tuning results image comparison -->
+  <section class="reveal">
+    <h2>Fine-tuning results</h2>
+    <p>
+      The clearest way to see what LoRA training accomplished is to compare the same prompt rendered by the base SDXL model vs. the fine-tuned model.
+    </p>
+    <div class="stub-placeholder">
+      Image comparison slider: base vs LoRA output — coming soon
+      <br><br>
+      <span style="font-size:0.8rem; font-style:normal; color:#b8a08c;">
+        Will compare:<br>
+        <code>../outputs/eval/eval_0_base.png</code> vs <code>../outputs/eval/eval_0_lora.png</code><br>
+        <code>../outputs/eval/eval_3_base.png</code> vs <code>../outputs/eval/eval_3_lora.png</code>
+      </span>
+    </div>
+  </section>
+
+  <!-- Section 5: "hopper style" prompt effect — STUB -->
+  <!-- TODO: Prompt effect comparison -->
+  <section class="reveal">
+    <h2>The "hopper style" prompt effect</h2>
+    <p>
+      An interesting question: how much of the model's output is shaped by the LoRA weights themselves vs. simply including "in the style of Edward Hopper" in the prompt? The comparison below shows the same scene generated with and without that phrase.
+    </p>
+    <div class="stub-placeholder">
+      Side-by-side: with vs without "in the style of Edward Hopper" — coming soon
+      <br><br>
+      <span style="font-size:0.8rem; font-style:normal; color:#b8a08c;">
+        Will compare:<br>
+        <code>../outputs/skyline_no_hopper.png</code> vs <code>../outputs/skyline_hopper.png</code>
+      </span>
+    </div>
+  </section>
+
+  <!-- Section 6: Performance & Optimization -->
+  <section class="reveal">
+    <h2>Performance &amp; Optimization</h2>
+    <p>
+      Training a model is only half the story. The other half is serving it — getting images generated fast enough that the experience feels responsive. This section walks through the optimization journey: what we tried, what worked, what didn't, and where we landed.
+    </p>
+
+    <!-- 6a: Cold start vs warm start -->
+    <h3>Cold starts and warm starts</h3>
+    <p>
+      When you deploy a model on serverless GPU infrastructure like <code>Modal</code>, your code doesn't run on a persistent server. Instead, a container spins up on demand, loads the model into GPU memory, and then handles requests. The first request after that spin-up is the <em>cold start</em> — it includes container initialization, model loading, and the first inference pass. Subsequent requests to the same running container are <em>warm</em> — the model is already in memory and ready to go. Optimizing both matters, but they respond to different techniques.
+    </p>
+  </section>
+
+  <!-- 6b: Cold Start Progression -->
+  <section class="reveal">
+    <h3>Cold start progression</h3>
+    <p>
+      The first optimization target was cold start time — how long a user waits when no container is running.
+    </p>
+    <div class="chart-container" id="cold-start-chart"></div>
+    <div class="callout">
+      <p>
+        The biggest single win was <strong>Modal snapshots</strong>, which saved 16 seconds off the cold start. A GPU memory snapshot serializes the entire model state — weights, CUDA context, allocated buffers — into a checkpoint. When a new container starts, it restores from this snapshot instead of re-downloading and re-initializing the model from scratch. Think of it as hibernation for GPU state.
+      </p>
+    </div>
+    <p>
+      Baking the LoRA weights directly into the snapshot (rather than loading them dynamically at startup) saved an additional 2 seconds. The snapshot now contains the fully-merged model, ready to generate on the first request.
+    </p>
+  </section>
+
+  <!-- 6c: Warm Latency Progression -->
+  <section class="reveal">
+    <h3>Warm latency progression</h3>
+    <p>
+      Once the container is running, the question becomes: how fast can we generate an image? This is the latency users feel on every request after the first.
+    </p>
+    <div class="chart-container" id="warm-latency-chart"></div>
+    <p>
+      The fastest warm time we measured was <strong>17.7 seconds</strong> using <code>tf32</code> precision with <code>compile_repeated_blocks()</code> — a technique that applies <code>torch.compile</code> selectively to the repeated UNet blocks rather than compiling the entire pipeline. But we didn't ship that configuration.
+    </p>
+    <div class="callout">
+      <p>
+        The fastest configuration wasn't chosen as the production default. After a snapshot restore, the first request with compiled blocks was unpredictable — sometimes fast, sometimes slower than baseline as the compiled cache warmed up. <strong>Production favors consistency over peak speed.</strong>
+      </p>
+    </div>
+  </section>
+
+  <!-- 6d: Cold vs Warm Tradeoff -->
+  <section class="reveal">
+    <h3>The cold/warm tradeoff</h3>
+    <p>
+      Every optimization decision involves a tradeoff between cold and warm performance. The scatter plot below maps each configuration we tested onto these two axes — the ideal position is the bottom-left corner: fast cold start <em>and</em> fast warm latency.
+    </p>
+    <div class="chart-container" id="scatter-chart"></div>
+    <p>
+      The outlier is immediately obvious: <code>bf16 + channels_last + compile</code> at <strong>99.45 seconds cold</strong>. What happened? <code>torch.compile</code> traces and optimizes the computation graph at runtime, producing highly efficient CUDA kernels. But when LoRA adapter weights are present, they alter the graph structure. Each time the container restores, the compiled cache is invalidated and the entire model must be recompiled from scratch — a process that takes over a minute on SDXL. This made the combination of <code>torch.compile</code> and LoRA fundamentally incompatible for production serving.
+    </p>
+  </section>
+
+  <!-- 6e: Final Production Path -->
+  <section class="reveal">
+    <h3>Production latency profile</h3>
+    <p>
+      The final deployed configuration hits three distinct latency tiers depending on the container state.
+    </p>
+    <div class="chart-container" id="production-chart"></div>
+    <p>
+      After a fresh deploy, the first request is the fastest cold start because Modal creates the snapshot eagerly. After a container scales to zero and restores, the snapshot restore path adds a small overhead. Warm requests settle into a tight, predictable band.
+    </p>
+  </section>
+
+  <!-- 6f: Warm Variance -->
+  <section class="reveal">
+    <h3>Warm variance</h3>
+    <p>
+      Consistency matters as much as raw speed. Here are three consecutive warm requests showing the spread:
+    </p>
+    <div class="chart-container" id="variance-chart"></div>
+    <p>
+      A <strong>0.25-second spread</strong> across warm requests. The pipeline is deterministic enough that variance comes from GPU scheduling jitter, not from anything in our code. This is the kind of stability that makes the production config worth the marginal speed sacrifice.
+    </p>
+  </section>
+
+  <!-- 6g: What we settled on -->
+  <section class="reveal">
+    <h3>What we settled on and why</h3>
+    <p>
+      The final production configuration balances speed, consistency, and compatibility:
+    </p>
+    <ul class="summary-list">
+      <li><code>fp16</code> base weights with the fp16-safe VAE decoder (avoids NaN outputs in half-precision)</li>
+      <li><code>tf32</code> enabled for matrix multiplications — free speedup on Ampere+ GPUs with no precision loss for inference</li>
+      <li><code>channels_last</code> memory format — matches the GPU's preferred memory layout for convolutions</li>
+      <li>LoRA weights loaded and merged <em>into the snapshot</em>, not loaded dynamically at startup</li>
+      <li>A warm-up inference pass runs before the snapshot is captured, so CUDA kernels and memory pools are pre-allocated</li>
+      <li>No <code>torch.compile</code> — incompatible with LoRA weight merging, causes full recompilation on restore</li>
+      <li>50 inference steps (quality-optimized; speed-optimized configs use 25-30)</li>
+    </ul>
+  </section>
+
+  <!-- Section 7: SDXL was overkill -->
+  <section class="reveal">
+    <h2>SDXL was overkill</h2>
+    <p>
+      Let's be honest: SDXL is a 6.6 billion parameter model designed to generate photorealistic, publication-quality images at 1024&times;1024. For this project — generating Hopper-style paintings for a personal site — that's almost certainly more model than needed. A smaller architecture like Stable Diffusion 1.5 (roughly 860M parameters) or even a distilled SDXL variant would likely produce comparable results for this style, with dramatically faster inference and lower GPU costs.
+    </p>
+    <p>
+      That's a future experiment. The optimization work here still transfers — snapshots, precision tuning, and memory layout apply regardless of model size. But the lesson is worth noting: match the model to the task, not the other way around.
+    </p>
+  </section>
+
+  <!-- Section 8: Claude wasn't that helpful — STUB -->
+  <!-- TODO: Claude quotes from notes -->
+  <section class="reveal">
+    <h2>Claude wasn't that helpful</h2>
+    <div class="stub-placeholder">
+      Quotes and observations about using Claude for ML optimization — coming soon
+    </div>
+  </section>
+
+  <!-- Section 9: Embed Slot -->
+  <section class="reveal">
+    <h2>Try it</h2>
+    <div id="hopper-embed" style="border: 2px dashed #d4c8b8; border-radius: 8px; padding: 3rem 2rem; text-align: center; color: #9a8e7e; min-height: 400px; display: flex; align-items: center; justify-content: center; background: rgba(212, 200, 184, 0.08);">
+      <p>Hopper image generator will be embedded here</p>
+    </div>
+  </section>
+
+</main>
+
+<footer style="text-align:center; padding: 3rem 1rem; color: #9a8e7e; font-size: 0.85rem; border-top: 1px solid #d4c8b8;">
+  <p>Built with SDXL, LoRA, Modal, and too many benchmark runs.</p>
+</footer>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── Reading Progress Bar ──
+  const progressBar = document.getElementById('progress-bar');
+  window.addEventListener('scroll', function() {
+    const scrollTop = window.scrollY;
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progressBar.style.width = progress + '%';
+  });
+
+  // ── Scroll Reveal ──
+  const revealElements = document.querySelectorAll('.reveal');
+  const revealObserver = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+      }
+    });
+  }, { threshold: 0.1 });
+  revealElements.forEach(function(el) { revealObserver.observe(el); });
+
+  // ── Shared Tooltip ──
+  const tooltip = document.getElementById('chart-tooltip');
+
+  function showTooltip(e, html) {
+    tooltip.innerHTML = html;
+    tooltip.classList.add('show');
+    positionTooltip(e);
+  }
+
+  function moveTooltip(e) {
+    positionTooltip(e);
+  }
+
+  function hideTooltip() {
+    tooltip.classList.remove('show');
+  }
+
+  function positionTooltip(e) {
+    var x = e.clientX + 14;
+    var y = e.clientY - 10;
+    var rect = tooltip.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth - 10) x = e.clientX - rect.width - 14;
+    if (y + rect.height > window.innerHeight - 10) y = e.clientY - rect.height - 10;
+    if (y < 10) y = 10;
+    tooltip.style.left = x + 'px';
+    tooltip.style.top = y + 'px';
+  }
+
+  // ── SVG Helpers ──
+  function svgEl(tag, attrs) {
+    var el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    if (attrs) {
+      for (var k in attrs) el.setAttribute(k, attrs[k]);
+    }
+    return el;
+  }
+
+  function svgText(text, x, y, attrs) {
+    var el = svgEl('text', Object.assign({ x: x, y: y }, attrs || {}));
+    el.textContent = text;
+    return el;
+  }
+
+  // ── Create Bar Chart ──
+  function createBarChart(containerId, data, options) {
+    var container = document.getElementById(containerId);
+    if (!container) return;
+
+    var opts = Object.assign({
+      barHeight: 36,
+      barGap: 24,
+      labelWidth: 200,
+      valueWidth: 70,
+      annotationOffset: 8,
+      maxValue: null,
+      unit: 's'
+    }, options || {});
+
+    var maxVal = opts.maxValue || Math.max.apply(null, data.map(function(d) { return d.value; })) * 1.15;
+    var chartLeft = opts.labelWidth;
+    var chartRight = 50;
+    var totalWidth = 700;
+    var barAreaWidth = totalWidth - chartLeft - chartRight;
+    var topPadding = 20;
+    var bottomPadding = 10;
+    var totalHeight = topPadding + data.length * (opts.barHeight + opts.barGap) - opts.barGap + bottomPadding;
+
+    var svg = svgEl('svg', {
+      viewBox: '0 0 ' + totalWidth + ' ' + totalHeight,
+      preserveAspectRatio: 'xMidYMid meet'
+    });
+
+    data.forEach(function(d, i) {
+      var y = topPadding + i * (opts.barHeight + opts.barGap);
+      var barWidth = (d.value / maxVal) * barAreaWidth;
+
+      // Label
+      var label = svgText(d.label, chartLeft - 12, y + opts.barHeight / 2 + 5, {
+        'text-anchor': 'end',
+        'font-family': 'Inter, sans-serif',
+        'font-size': '13',
+        'fill': '#2d2a26'
+      });
+      svg.appendChild(label);
+
+      // Bar background track
+      var track = svgEl('rect', {
+        x: chartLeft,
+        y: y,
+        width: barAreaWidth,
+        height: opts.barHeight,
+        rx: 4,
+        fill: 'rgba(212,200,184,0.25)'
+      });
+      svg.appendChild(track);
+
+      // Bar
+      var bar = svgEl('rect', {
+        x: chartLeft,
+        y: y,
+        width: barWidth,
+        height: opts.barHeight,
+        rx: 4,
+        fill: d.color,
+        class: 'bar-rect',
+        'data-index': i
+      });
+      svg.appendChild(bar);
+
+      // Value text
+      var valText = svgText(d.value + opts.unit, chartLeft + barWidth + 8, y + opts.barHeight / 2 + 5, {
+        'font-family': 'Inter, sans-serif',
+        'font-size': '13',
+        'font-weight': '600',
+        'fill': '#2d2a26'
+      });
+      svg.appendChild(valText);
+
+      // Tooltip area (invisible rect over the bar area)
+      var hitArea = svgEl('rect', {
+        x: chartLeft,
+        y: y,
+        width: barAreaWidth,
+        height: opts.barHeight,
+        fill: 'transparent',
+        style: 'cursor: pointer'
+      });
+      hitArea.addEventListener('mouseenter', function(e) {
+        var html = '<strong>' + d.label + '</strong><br>' + d.value + opts.unit;
+        if (d.annotation) html += '<br><span style="opacity:0.7">' + d.annotation + '</span>';
+        showTooltip(e, html);
+      });
+      hitArea.addEventListener('mousemove', moveTooltip);
+      hitArea.addEventListener('mouseleave', hideTooltip);
+      svg.appendChild(hitArea);
+    });
+
+    container.appendChild(svg);
+
+    // Animate bars on scroll
+    var chartObserver = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (entry.isIntersecting) {
+          var bars = svg.querySelectorAll('.bar-rect');
+          bars.forEach(function(bar, idx) {
+            setTimeout(function() {
+              bar.classList.add('animate');
+            }, idx * 120);
+          });
+          chartObserver.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.2 });
+    chartObserver.observe(container);
+  }
+
+  // ── Create Scatter Chart ──
+  function createScatterChart(containerId, data, options) {
+    var container = document.getElementById(containerId);
+    if (!container) return;
+
+    var opts = Object.assign({
+      paddingLeft: 60,
+      paddingBottom: 50,
+      paddingTop: 30,
+      paddingRight: 30,
+    }, options || {});
+
+    var totalWidth = 700;
+    var totalHeight = 400;
+    var plotLeft = opts.paddingLeft;
+    var plotBottom = totalHeight - opts.paddingBottom;
+    var plotTop = opts.paddingTop;
+    var plotRight = totalWidth - opts.paddingRight;
+    var plotWidth = plotRight - plotLeft;
+    var plotHeight = plotBottom - plotTop;
+
+    // Compute axis ranges
+    var xValues = data.map(function(d) { return d.cold; });
+    var yValues = data.map(function(d) { return d.warm; });
+    var xMin = 0;
+    var xMax = Math.ceil(Math.max.apply(null, xValues) / 10) * 10 + 10;
+    var yMin = Math.floor(Math.min.apply(null, yValues)) - 1;
+    var yMax = Math.ceil(Math.max.apply(null, yValues)) + 1;
+
+    function xScale(v) { return plotLeft + ((v - xMin) / (xMax - xMin)) * plotWidth; }
+    function yScale(v) { return plotBottom - ((v - yMin) / (yMax - yMin)) * plotHeight; }
+
+    var svg = svgEl('svg', {
+      viewBox: '0 0 ' + totalWidth + ' ' + totalHeight,
+      preserveAspectRatio: 'xMidYMid meet'
+    });
+
+    // Grid lines
+    var xTicks = [];
+    for (var xt = 0; xt <= xMax; xt += 20) xTicks.push(xt);
+    var yTicks = [];
+    for (var yt = yMin; yt <= yMax; yt += 1) yTicks.push(yt);
+
+    xTicks.forEach(function(v) {
+      var x = xScale(v);
+      svg.appendChild(svgEl('line', { x1: x, y1: plotTop, x2: x, y2: plotBottom, stroke: '#d4c8b8', 'stroke-width': 0.5 }));
+      svg.appendChild(svgText(v + 's', x, plotBottom + 20, { 'text-anchor': 'middle', 'font-family': 'Inter, sans-serif', 'font-size': '11', fill: '#9a8e7e' }));
+    });
+
+    yTicks.forEach(function(v) {
+      var y = yScale(v);
+      svg.appendChild(svgEl('line', { x1: plotLeft, y1: y, x2: plotRight, y2: y, stroke: '#d4c8b8', 'stroke-width': 0.5 }));
+      svg.appendChild(svgText(v + 's', plotLeft - 10, y + 4, { 'text-anchor': 'end', 'font-family': 'Inter, sans-serif', 'font-size': '11', fill: '#9a8e7e' }));
+    });
+
+    // Axes
+    svg.appendChild(svgEl('line', { x1: plotLeft, y1: plotBottom, x2: plotRight, y2: plotBottom, stroke: '#2d2a26', 'stroke-width': 1 }));
+    svg.appendChild(svgEl('line', { x1: plotLeft, y1: plotTop, x2: plotLeft, y2: plotBottom, stroke: '#2d2a26', 'stroke-width': 1 }));
+
+    // Axis labels
+    svg.appendChild(svgText('Cold / first-request time (s)', (plotLeft + plotRight) / 2, totalHeight - 5, {
+      'text-anchor': 'middle', 'font-family': 'Inter, sans-serif', 'font-size': '12', fill: '#6b5e50'
+    }));
+
+    var yLabel = svgText('Warm request time (s)', 0, 0, {
+      'text-anchor': 'middle', 'font-family': 'Inter, sans-serif', 'font-size': '12', fill: '#6b5e50',
+      transform: 'translate(16, ' + ((plotTop + plotBottom) / 2) + ') rotate(-90)'
+    });
+    svg.appendChild(yLabel);
+
+    // "Ideal" arrow annotation
+    var idealX = xScale(15);
+    var idealY = yScale(yMin + 0.5);
+    svg.appendChild(svgText('\u2199 ideal', idealX, idealY, {
+      'font-family': 'Cormorant Garamond, serif', 'font-size': '14', 'font-style': 'italic', fill: '#9a8e7e'
+    }));
+
+    // Points
+    data.forEach(function(d, i) {
+      var cx = xScale(d.cold);
+      var cy = yScale(d.warm);
+      var g = svgEl('g', { class: 'scatter-point', 'data-index': i });
+
+      g.appendChild(svgEl('circle', {
+        cx: cx, cy: cy, r: 7, fill: d.color, stroke: '#f5f0e8', 'stroke-width': 2
+      }));
+
+      // Hit area
+      var hit = svgEl('circle', {
+        cx: cx, cy: cy, r: 16, fill: 'transparent', style: 'cursor: pointer'
+      });
+      hit.addEventListener('mouseenter', function(e) {
+        showTooltip(e, '<strong>' + d.label + '</strong><br>Cold: ' + d.cold + 's<br>Warm: ' + d.warm + 's');
+      });
+      hit.addEventListener('mousemove', moveTooltip);
+      hit.addEventListener('mouseleave', hideTooltip);
+      g.appendChild(hit);
+
+      svg.appendChild(g);
+    });
+
+    container.appendChild(svg);
+
+    // Animate on scroll
+    var obs = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (entry.isIntersecting) {
+          var pts = svg.querySelectorAll('.scatter-point');
+          pts.forEach(function(pt, idx) {
+            setTimeout(function() { pt.classList.add('animate'); }, idx * 150);
+          });
+          obs.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.2 });
+    obs.observe(container);
+  }
+
+  // ── Create Variance Chart ──
+  function createVarianceChart(containerId, values, mean) {
+    var container = document.getElementById(containerId);
+    if (!container) return;
+
+    var totalWidth = 700;
+    var totalHeight = 200;
+    var padLeft = 60;
+    var padRight = 40;
+    var padTop = 30;
+    var padBottom = 40;
+    var plotWidth = totalWidth - padLeft - padRight;
+    var plotHeight = totalHeight - padTop - padBottom;
+
+    var yMin = Math.min.apply(null, values) - 0.2;
+    var yMax = Math.max.apply(null, values) + 0.2;
+
+    function xScale(i) { return padLeft + (i / (values.length - 1)) * plotWidth; }
+    function yScale(v) { return padTop + plotHeight - ((v - yMin) / (yMax - yMin)) * plotHeight; }
+
+    var svg = svgEl('svg', {
+      viewBox: '0 0 ' + totalWidth + ' ' + totalHeight,
+      preserveAspectRatio: 'xMidYMid meet'
+    });
+
+    // Y-axis ticks
+    var step = 0.1;
+    for (var v = Math.ceil(yMin * 10) / 10; v <= yMax; v = Math.round((v + step) * 10) / 10) {
+      var y = yScale(v);
+      svg.appendChild(svgEl('line', { x1: padLeft, y1: y, x2: totalWidth - padRight, y2: y, stroke: '#d4c8b8', 'stroke-width': 0.5 }));
+      svg.appendChild(svgText(v.toFixed(1) + 's', padLeft - 10, y + 4, {
+        'text-anchor': 'end', 'font-family': 'Inter, sans-serif', 'font-size': '11', fill: '#9a8e7e'
+      }));
+    }
+
+    // Mean line (dashed)
+    var meanY = yScale(mean);
+    svg.appendChild(svgEl('line', {
+      x1: padLeft, y1: meanY, x2: totalWidth - padRight, y2: meanY,
+      stroke: '#1a6b5a', 'stroke-width': 1.5, 'stroke-dasharray': '6,4'
+    }));
+    svg.appendChild(svgText('mean: ' + mean.toFixed(2) + 's', totalWidth - padRight + 5, meanY + 4, {
+      'font-family': 'Inter, sans-serif', 'font-size': '11', fill: '#1a6b5a', 'text-anchor': 'start'
+    }));
+
+    // Connecting line
+    var linePoints = values.map(function(v, i) { return xScale(i) + ',' + yScale(v); }).join(' ');
+    svg.appendChild(svgEl('polyline', {
+      points: linePoints, fill: 'none', stroke: '#1a6b5a', 'stroke-width': 2
+    }));
+
+    // Points
+    values.forEach(function(v, i) {
+      var cx = xScale(i);
+      var cy = yScale(v);
+      var circle = svgEl('circle', {
+        cx: cx, cy: cy, r: 5, fill: '#1a6b5a', stroke: '#f5f0e8', 'stroke-width': 2,
+        class: 'variance-point', 'data-index': i
+      });
+      svg.appendChild(circle);
+
+      // Label
+      svg.appendChild(svgText('Request ' + (i + 1), cx, padTop + plotHeight + 25, {
+        'text-anchor': 'middle', 'font-family': 'Inter, sans-serif', 'font-size': '12', fill: '#6b5e50'
+      }));
+
+      // Value label
+      svg.appendChild(svgText(v.toFixed(2) + 's', cx, cy - 12, {
+        'text-anchor': 'middle', 'font-family': 'Inter, sans-serif', 'font-size': '11', 'font-weight': '600', fill: '#2d2a26'
+      }));
+    });
+
+    container.appendChild(svg);
+
+    // Animate on scroll
+    var obs = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (entry.isIntersecting) {
+          var pts = svg.querySelectorAll('.variance-point');
+          pts.forEach(function(pt, idx) {
+            setTimeout(function() { pt.classList.add('animate'); }, idx * 200);
+          });
+          obs.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.3 });
+    obs.observe(container);
+  }
+
+  // ── Image Comparison Slider Infrastructure ──
+  function initComparisonSlider(container) {
+    if (!container) return;
+    var handle = container.querySelector('.slider-handle');
+    var overlay = container.querySelector('.img-overlay');
+    if (!handle || !overlay) return;
+
+    var dragging = false;
+
+    function setPosition(x) {
+      var rect = container.getBoundingClientRect();
+      var pos = Math.max(0, Math.min(x - rect.left, rect.width));
+      var pct = (pos / rect.width) * 100;
+      handle.style.left = pct + '%';
+      overlay.style.width = pct + '%';
+    }
+
+    container.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      dragging = true;
+      setPosition(e.clientX);
+    });
+
+    window.addEventListener('mousemove', function(e) {
+      if (dragging) setPosition(e.clientX);
+    });
+
+    window.addEventListener('mouseup', function() { dragging = false; });
+
+    container.addEventListener('touchstart', function(e) {
+      dragging = true;
+      setPosition(e.touches[0].clientX);
+    }, { passive: true });
+
+    container.addEventListener('touchmove', function(e) {
+      if (dragging) setPosition(e.touches[0].clientX);
+    }, { passive: true });
+
+    container.addEventListener('touchend', function() { dragging = false; });
+  }
+
+  // Initialize any comparison sliders on the page
+  document.querySelectorAll('.comparison-slider').forEach(initComparisonSlider);
+
+  // ── Render All Charts ──
+
+  // 6b: Cold Start Progression
+  createBarChart('cold-start-chart', [
+    { label: 'Baseline', value: 49.2, annotation: '@app.function, reload every call', color: '#b8a08c' },
+    { label: '+ Modal Snapshots', value: 33.0, annotation: 'GPU memory serialized', color: '#9aab8e' },
+    { label: '+ LoRA in Snapshot', value: 31.03, annotation: 'LoRA baked in, warm-up included', color: '#1a6b5a' }
+  ], { maxValue: 56 });
+
+  // 6c: Warm Latency Progression
+  createBarChart('warm-latency-chart', [
+    { label: 'Baseline', value: 21.0, annotation: 'fp16, no optimizations', color: '#b8a08c' },
+    { label: '+ Snapshots', value: 21.0, annotation: 'no warm speedup expected', color: '#9aab8e' },
+    { label: '+ tf32 + regional compile', value: 17.7, annotation: 'compile_repeated_blocks()', color: '#5b8a8f' },
+    { label: '+ bf16 + channels_last', value: 18.9, annotation: 'wider exponent, better memory layout', color: '#7b8fa1' },
+    { label: 'Production default', value: 19.53, annotation: 'fp16, tf32, channels_last, LoRA snapshotted', color: '#1a6b5a' }
+  ], { maxValue: 24 });
+
+  // 6d: Cold vs Warm Scatter
+  createScatterChart('scatter-chart', [
+    { label: 'No snapshot baseline', cold: 49.2, warm: 21.0, color: '#b8a08c' },
+    { label: 'Snapshot base model', cold: 33.0, warm: 21.0, color: '#9aab8e' },
+    { label: 'fp16 + compile_repeated_blocks', cold: 33.0, warm: 17.7, color: '#5b8a8f' },
+    { label: 'bf16 + channels_last + compile', cold: 99.45, warm: 18.9, color: '#7b8fa1' },
+    { label: 'Final: snapshotted LoRA', cold: 31.03, warm: 19.53, color: '#1a6b5a' }
+  ]);
+
+  // 6e: Production Latency
+  createBarChart('production-chart', [
+    { label: 'After deploy (first)', value: 28.37, annotation: '', color: '#1a6b5a' },
+    { label: 'After restore (cold)', value: 31.03, annotation: '', color: '#1a6b5a' },
+    { label: 'Warm (mean)', value: 19.53, annotation: '', color: '#1a6b5a' }
+  ], { maxValue: 36 });
+
+  // 6f: Warm Variance
+  createVarianceChart('variance-chart', [19.40, 19.53, 19.65], 19.53);
+
+})();
+</script>
+</body>
+</html>

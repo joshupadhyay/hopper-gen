@@ -25,6 +25,9 @@ This isn't a Modal Volume
 
 """
 
+import os
+import time
+
 import modal
 
 app = modal.App("Optimized-Generate-Hopper")
@@ -36,6 +39,14 @@ DATA_DIR = "/data"
 HF_CACHE_DIR = "/root/.cache/huggingface"
 
 MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
+VAE_ID = "madebyollin/sdxl-vae-fp16-fix"
+ENABLE_REGIONAL_COMPILE = False
+ENABLE_FUSED_QKV = True
+NEGATIVE_PROMPT = "blurry, low quality, cartoon, anime, 3d render, photograph, photo"
+SNAPSHOT_ADAPTER_NAME = os.environ.get("HOPPER_ADAPTER_NAME", "v1")
+WARMUP_PROMPT = "hopper style empty diner interior at dawn"
+WARMUP_STEPS = 4
+WARMUP_SIZE = 1024
 
 PRESETS = {
     "square": (1024, 1024),
@@ -66,7 +77,12 @@ MINUTES = 60 # 60s
     scaledown_window= 5 * MINUTES, # scale down after 5 min of inactivity
     timeout=30 * MINUTES,
     volumes={DATA_DIR: training_data, HF_CACHE_DIR: model_cache},
-    secrets=[modal.Secret.from_name("huggingface-secret")],
+    secrets=[
+        modal.Secret.from_name("huggingface-secret"),
+        modal.Secret.from_dict(
+            {"HOPPER_ADAPTER_NAME": os.environ.get("HOPPER_ADAPTER_NAME", "v1")}
+        ),
+    ],
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
     )
@@ -74,31 +90,60 @@ class SDXLGenerator:
     @modal.enter(snap=True)
     def init(self):
         import torch
+        from diffusers import AutoencoderKL
         from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
 
         # TF32 for faster matmul on Ampere GPUs (A10G)
         torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
 
-        print(f"Loading SDXL pipeline in bfloat16...")
+        print("Loading SDXL pipeline in fp16 with fp16-safe VAE...")
+        vae = AutoencoderKL.from_pretrained(
+            VAE_ID,
+            torch_dtype=torch.float16,
+        )
         self.pipeline = StableDiffusionXLPipeline.from_pretrained(
             MODEL_ID,
-            torch_dtype=torch.bfloat16,
+            vae=vae,
+            torch_dtype=torch.float16,
+            variant="fp16",
             use_safetensors=True,
         ).to("cuda")
         model_cache.commit()
 
-        ## === Optimizations
-        self.pipeline.fuse_qkv_projections(vae=False)
+        if ENABLE_FUSED_QKV:
+            self.pipeline.fuse_qkv_projections(vae=False)
 
-        # channels_last memory format for better GPU utilization
+        # channels_last is a cheap optimization and doesn't mutate weights the
+        # way LoRA loading does, so it's safe to keep.
         self.pipeline.unet.to(memory_format=torch.channels_last)
         self.pipeline.vae.to(memory_format=torch.channels_last)
 
-        # Regional compilation: compiles BasicTransformerBlock instances
-        # Full torch.compile is incompatible with dynamic LoRA loading —
-        # load_lora_weights mutates the model, invalidating the compiled graph
-        # and forcing a full recompile (~3 min) on every generate() call.
-        self.pipeline.unet.compile_repeated_blocks(fullgraph=True)
+        # Regional compilation made warm calls faster, but cold restores paid
+        # the cost back by recompiling after LoRA weight mutation.
+        if ENABLE_REGIONAL_COMPILE:
+            self.pipeline.unet.compile_repeated_blocks(fullgraph=True)
+
+        adapter_path = f"{DATA_DIR}/adapters/{SNAPSHOT_ADAPTER_NAME}"
+        print(f"Loading snapshot LoRA adapter from {adapter_path}...")
+        self.pipeline.load_lora_weights(adapter_path)
+        self.snapshot_adapter_name = SNAPSHOT_ADAPTER_NAME
+
+        print(
+            f"Running warm-up inference before snapshot "
+            f"({WARMUP_STEPS} steps at {WARMUP_SIZE}x{WARMUP_SIZE})..."
+        )
+        warmup_started_at = time.perf_counter()
+        self.pipeline(
+            prompt=WARMUP_PROMPT,
+            negative_prompt=NEGATIVE_PROMPT,
+            width=WARMUP_SIZE,
+            height=WARMUP_SIZE,
+            guidance_scale=7.5,
+            num_inference_steps=WARMUP_STEPS,
+            generator=torch.Generator("cuda").manual_seed(0),
+        )
+        print(f"Warm-up complete in {time.perf_counter() - warmup_started_at:.2f}s")
 
     @modal.method()
     def generate(
@@ -113,14 +158,23 @@ class SDXLGenerator:
         height: int = 1024,
         seed: int = -1,
     ) -> list[bytes]:
-        import torch
         import io
+        import torch
         from PIL import Image
 
-        if use_lora:
-            adapter_path = f"{DATA_DIR}/adapters/{run_name}"
-            print(f"Loading LoRA adapter from {adapter_path}...")
-            self.pipeline.load_lora_weights(adapter_path)
+        request_started_at = time.perf_counter()
+
+        if not use_lora:
+            raise ValueError(
+                "Base generation is disabled for the snapshotted production path. "
+                "The Hopper LoRA is baked into the snapshot."
+            )
+
+        if run_name != self.snapshot_adapter_name:
+            print(
+                f"Requested adapter '{run_name}' differs from snapshotted adapter "
+                f"'{self.snapshot_adapter_name}'. Using the snapshotted adapter."
+            )
 
         generator = None
         if seed >= 0:
@@ -147,16 +201,19 @@ class SDXLGenerator:
 
         images_bytes = []
         for i in range(num_images):
+            inference_started_at = time.perf_counter()
             # self.pipline() returns StableDiffusionXLPipelineOutput, but not inferrable through torch.compile
             result = self.pipeline(
                 prompt=prompt,
-                negative_prompt="blurry, low quality, cartoon, anime, 3d render, photograph, photo",
+                negative_prompt=NEGATIVE_PROMPT,
                 width=gen_width,
                 height=gen_height,
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_steps,
                 generator=generator,
             ).images[0] 
+            inference_elapsed = time.perf_counter() - inference_started_at
+            iter_per_second = num_steps / inference_elapsed if inference_elapsed > 0 else 0.0
 
             # Upscale if needed
             if result.size != (width, height):
@@ -165,10 +222,17 @@ class SDXLGenerator:
             buf = io.BytesIO()
             result.save(buf, format="PNG", quality=95)
             images_bytes.append(buf.getvalue())
-            print(f"  Generated image {i + 1}/{num_images}")
+            print(
+                f"  Generated image {i + 1}/{num_images} in {inference_elapsed:.2f}s "
+                f"({iter_per_second:.2f} it/s)"
+            )
 
-        if use_lora:
-            self.pipeline.unload_lora_weights()
+        print(
+            "Request summary: "
+            f"total={time.perf_counter() - request_started_at:.2f}s, "
+            f"lora=snapshotted({self.snapshot_adapter_name}), "
+            f"compile={'on' if ENABLE_REGIONAL_COMPILE else 'off'}"
+        )
 
         return images_bytes
 
@@ -201,7 +265,11 @@ def main(
 
     print(f"Prompt: {prompt}")
     print(f"Size: {w}x{h} (preset: {preset})")
-    print(f"LoRA: {'yes' if not no_lora else 'no'} (run: {run_name})")
+    print(f"LoRA: snapshotted adapter '{SNAPSHOT_ADAPTER_NAME}'")
+    if run_name != SNAPSHOT_ADAPTER_NAME:
+        print(f"Requested run_name '{run_name}' will be ignored in favor of the snapshotted adapter.")
+    if no_lora:
+        print("Warning: --no-lora is unsupported for the snapshotted production path.")
 
     images = SDXLGenerator().generate.remote(
         prompt=prompt,

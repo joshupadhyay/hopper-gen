@@ -1,23 +1,13 @@
-"""Single-image test for torch.compile benchmarking."""
-import modal
-from pathlib import Path
-import time
+"""Compile experiment placeholder.
 
-SDXLGenerator = modal.Cls.from_name("Optimized-Generate-Hopper", "SDXLGenerator")
-instance = SDXLGenerator()
+The production Hopper inference path intentionally avoids torch compilation and
+regional compilation by default because first-request latency is the priority.
+If compile experiments return, keep them isolated from the production app and
+benchmark them separately against the deployed fp16 snapshot path.
+"""
 
-Path("outputs").mkdir(exist_ok=True)
-
-print("Calling generate (first call triggers JIT compile)...")
-start = time.time()
-result = instance.generate.remote(
-    prompt="hopper style a quiet diner at dawn",
-    run_name="v12",
-    seed=42,
-)
-elapsed = time.time() - start
-print(f"Total remote call: {elapsed:.1f}s")
-
-for i, img_bytes in enumerate(result):
-    Path(f"outputs/compile_test_{i}.png").write_bytes(img_bytes)
-    print(f"Saved outputs/compile_test_{i}.png")
+if __name__ == "__main__":
+    print(
+        "Compile experiments are disabled for the default Hopper inference path. "
+        "Use scripts/benchmark_inference.py to benchmark the deployed production setup."
+    )
