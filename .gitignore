@@ -5,3 +5,7 @@ __pycache__/
 data/images/
 *.safetensors
 *.bin
+.next/
+node_modules/
+tsconfig.tsbuildinfo
+.claude-design/
